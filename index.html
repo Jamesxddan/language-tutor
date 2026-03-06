@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🌍 Language Tutor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #f9fafb; }
+    @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // ⚠️ Replace with your free Gemini API key from https://aistudio.google.com/app/apikey
+    const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE";
+
+    const languages = {
+      telugu:  { name: "Telugu",   flag: "🇮🇳", hello: "నమస్కారం (Namaskāram)", lang: "te-IN" },
+      tamil:   { name: "Tamil",    flag: "🇮🇳", hello: "வணக்கம் (Vanakkam)",    lang: "ta-IN" },
+      spanish: { name: "Spanish",  flag: "🇪🇸", hello: "¡Hola! (OH-lah)",        lang: "es-ES" },
+      french:  { name: "French",   flag: "🇫🇷", hello: "Bonjour! (Bon-ZHOOR)",   lang: "fr-FR" },
+      japanese:{ name: "Japanese", flag: "🇯🇵", hello: "こんにちは (Kon-ni-chi-wa)",lang:"ja-JP" },
+      hindi:   { name: "Hindi",    flag: "🇮🇳", hello: "नमस्ते (Namaste)",        lang: "hi-IN" },
+      german:  { name: "German",   flag: "🇩🇪", hello: "Hallo! (HAH-loh)",        lang: "de-DE" },
+      arabic:  { name: "Arabic",   flag: "🇸🇦", hello: "مرحبا (Mar-ha-ban)",      lang: "ar-SA" },
+    };
+
+    const quickStarters = [
+      "👋 Teach me how to say hello",
+      "🙏 How do I introduce myself?",
+      "😊 How do I say thank you?",
+      "🍕 How do I order food?",
+      "🗺️ How do I ask for directions?",
+      "💬 Teach me a common phrase",
+    ];
+
+    function extractPhrases(text) {
+      const matches = [];
+      const re = /👉\s*(.+?)\s*\(([^)]+)\)\s*=\s*(.+?)(?=\n|$)/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        matches.push({ script: m[1].trim(), pronunciation: m[2].trim(), meaning: m[3].trim() });
+      }
+      return matches;
+    }
+
+    function speak(text, langCode) {
+      if (!window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.lang = langCode;
+      utt.rate = 0.85;
+      window.speechSynthesis.speak(utt);
+    }
+
+    async function askGemini(langName, history, userText) {
+      const systemPrompt = `You are a super friendly, simple language tutor teaching ${langName} to absolute beginners.
+RULES:
+- User types in English. Respond in English but include ${langName} phrases.
+- Always format phrases EXACTLY like this on their own line:
+  👉 [native script] ([pronunciation]) = [English meaning]
+- Teach only 1-2 phrases per message. Keep it short (3-4 lines max).
+- Use emojis. Sound like an excited friend, not a textbook.
+- End with a fun challenge or question to keep them engaged.`;
+
+      // Build Gemini contents array
+      const contents = [
+        { role: "user", parts: [{ text: systemPrompt }] },
+        { role: "model", parts: [{ text: "Got it! I'm ready to teach 😊" }] },
+        ...history.slice(-6).map(m => ({
+          role: m.role === "user" ? "user" : "model",
+          parts: [{ text: m.text }]
+        })),
+      ];
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents }),
+        }
+      );
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "Oops! Try again 😊";
+    }
+
+    function App() {
+      const [lang, setLang] = useState("telugu");
+      const [messages, setMessages] = useState([]);
+      const [input, setInput] = useState("");
+      const [loading, setLoading] = useState(false);
+      const [started, setStarted] = useState(false);
+      const [tab, setTab] = useState("chat");
+      const [favourites, setFavourites] = useState([]);
+      const [progress, setProgress] = useState({ messages: 0, phrases: 0, streak: 1, byLang: {} });
+      const bottomRef = useRef();
+
+      useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
+
+      const toggleFav = (phrase) => {
+        setFavourites(prev => {
+          const exists = prev.find(f => f.script === phrase.script && f.lang === lang);
+          if (exists) return prev.filter(f => !(f.script === phrase.script && f.lang === lang));
+          return [...prev, { ...phrase, lang, langName: languages[lang].name, flag: languages[lang].flag }];
+        });
+      };
+
+      const isFav = (phrase) => favourites.some(f => f.script === phrase.script && f.lang === lang);
+
+      const sendMessage = async (text) => {
+        const userText = text || input.trim();
+        if (!userText || loading) return;
+        setInput("");
+        setStarted(true);
+        setTab("chat");
+
+        const userMsg = { role: "user", text: userText, id: Date.now() };
+        setMessages(prev => [...prev, userMsg]);
+        setLoading(true);
+
+        try {
+          const reply = await askGemini(languages[lang].name, [...messages, userMsg], userText);
+          const phrases = extractPhrases(reply);
+          setMessages(prev => [...prev, { role: "tutor", text: reply, id: Date.now(), phrases }]);
+          setProgress(prev => ({
+            ...prev,
+            messages: prev.messages + 1,
+            phrases: prev.phrases + phrases.length,
+            byLang: {
+              ...prev.byLang,
+              [lang]: {
+                name: languages[lang].name, flag: languages[lang].flag,
+                count: (prev.byLang[lang]?.count || 0) + 1,
+                phrases: (prev.byLang[lang]?.phrases || 0) + phrases.length,
+              }
+            }
+          }));
+        } catch(e) {
+          setMessages(prev => [...prev, { role: "tutor", text: `Error: ${e.message} 😢 Check your API key!`, id: Date.now(), phrases: [] }]);
+        }
+        setLoading(false);
+      };
+
+      const pill = (active, onClick, label) => (
+        <button onClick={onClick} style={{
+          padding: "6px 14px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 13,
+          fontWeight: active ? "bold" : "normal",
+          background: active ? "white" : "rgba(255,255,255,0.2)",
+          color: active ? "#4f46e5" : "white",
+        }}>{label}</button>
+      );
+
+      return (
+        <div style={{ fontFamily:"sans-serif", maxWidth:600, margin:"0 auto", height:"100vh", display:"flex", flexDirection:"column", background:"#f9fafb" }}>
+
+          {/* Header */}
+          <div style={{ background:"#4f46e5", color:"white", padding:"14px 16px" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <span style={{ fontSize:18, fontWeight:"bold" }}>🌍 Language Tutor</span>
+              <div style={{ display:"flex", gap:6 }}>
+                {pill(tab==="chat", ()=>setTab("chat"), "💬 Chat")}
+                {pill(tab==="favourites", ()=>setTab("favourites"), `⭐${favourites.length ? ` (${favourites.length})` : ""}`)}
+                {pill(tab==="progress", ()=>setTab("progress"), "📈")}
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {Object.entries(languages).map(([code, l]) => (
+                <button key={code} onClick={() => { setLang(code); setMessages([]); setStarted(false); }}
+                  style={{ padding:"5px 12px", borderRadius:20, border:"none", cursor:"pointer", fontSize:12,
+                    fontWeight: lang===code ? "bold" : "normal",
+                    background: lang===code ? "white" : "rgba(255,255,255,0.15)",
+                    color: lang===code ? "#4f46e5" : "white" }}>
+                  {l.flag} {l.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Favourites */}
+          {tab==="favourites" && (
+            <div style={{ flex:1, overflowY:"auto", padding:16 }}>
+              <h3 style={{ color:"#1f2937", marginBottom:12 }}>⭐ Saved Phrases</h3>
+              {favourites.length===0
+                ? <p style={{ color:"#9ca3af", textAlign:"center", marginTop:40 }}>No saved phrases yet.<br/>Tap ☆ Save on any phrase!</p>
+                : favourites.map((f,i) => (
+                  <div key={i} style={{ background:"white", borderRadius:12, padding:"12px 14px", marginBottom:10, boxShadow:"0 1px 4px rgba(0,0,0,0.07)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                    <div>
+                      <div style={{ fontSize:13, color:"#6b7280", marginBottom:2 }}>{f.flag} {f.langName}</div>
+                      <div style={{ fontSize:16, fontWeight:"bold", color:"#1f2937" }}>{f.script}</div>
+                      <div style={{ fontSize:13, color:"#6b7280" }}>({f.pronunciation}) = {f.meaning}</div>
+                    </div>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <button onClick={()=>speak(f.script, languages[f.lang]?.lang||"en")} style={{ background:"#ede9fe", border:"none", borderRadius:8, padding:"6px 10px", cursor:"pointer", fontSize:16 }}>🔊</button>
+                      <button onClick={()=>toggleFav(f)} style={{ background:"#fef3c7", border:"none", borderRadius:8, padding:"6px 10px", cursor:"pointer", fontSize:16 }}>🗑️</button>
+                    </div>
+                  </div>
+                ))
+              }
+            </div>
+          )}
+
+          {/* Progress */}
+          {tab==="progress" && (
+            <div style={{ flex:1, overflowY:"auto", padding:16 }}>
+              <h3 style={{ color:"#1f2937", marginBottom:16 }}>📈 Your Progress</h3>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginBottom:20 }}>
+                {[
+                  { label:"Conversations", value:progress.messages, icon:"💬" },
+                  { label:"Phrases Learned", value:progress.phrases, icon:"🗣️" },
+                  { label:"Day Streak", value:`${progress.streak} 🔥`, icon:"📅" },
+                ].map(s => (
+                  <div key={s.label} style={{ background:"white", borderRadius:12, padding:"14px 10px", textAlign:"center", boxShadow:"0 1px 4px rgba(0,0,0,0.07)" }}>
+                    <div style={{ fontSize:24 }}>{s.icon}</div>
+                    <div style={{ fontSize:22, fontWeight:"bold", color:"#4f46e5" }}>{s.value}</div>
+                    <div style={{ fontSize:11, color:"#9ca3af" }}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              <h4 style={{ color:"#374151", marginBottom:10 }}>Languages practiced</h4>
+              {Object.keys(progress.byLang).length===0
+                ? <p style={{ color:"#9ca3af" }}>Start chatting to see your stats!</p>
+                : Object.entries(progress.byLang).map(([code,d]) => (
+                  <div key={code} style={{ background:"white", borderRadius:12, padding:"12px 14px", marginBottom:8, boxShadow:"0 1px 4px rgba(0,0,0,0.07)", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <span style={{ fontSize:15 }}>{d.flag} {d.name}</span>
+                    <div style={{ textAlign:"right" }}>
+                      <div style={{ fontSize:13, color:"#4f46e5", fontWeight:"bold" }}>{d.count} chats</div>
+                      <div style={{ fontSize:12, color:"#9ca3af" }}>{d.phrases} phrases</div>
+                    </div>
+                  </div>
+                ))
+              }
+            </div>
+          )}
+
+          {/* Chat */}
+          {tab==="chat" && (
+            <>
+              <div style={{ flex:1, overflowY:"auto", padding:16, display:"flex", flexDirection:"column", gap:12 }}>
+                {!started && (
+                  <div style={{ textAlign:"center", marginTop:16 }}>
+                    <div style={{ fontSize:48, marginBottom:8 }}>{languages[lang].flag}</div>
+                    <h2 style={{ fontSize:20, color:"#1f2937", marginBottom:4 }}>Learn {languages[lang].name}!</h2>
+                    <p style={{ color:"#6b7280", fontSize:14, marginBottom:8 }}>Zero experience needed. Just type in English 😊</p>
+                    <div style={{ background:"#ede9fe", borderRadius:12, padding:"8px 16px", display:"inline-block", marginBottom:20, fontSize:14 }}>
+                      Say it now → <strong>{languages[lang].hello}</strong>
+                    </div>
+                    <p style={{ color:"#9ca3af", fontSize:13, marginBottom:12 }}>Tap to get started 👇</p>
+                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                      {quickStarters.map(s => (
+                        <button key={s} onClick={()=>sendMessage(s)}
+                          style={{ padding:"11px 16px", borderRadius:12, border:"2px solid #e5e7eb", background:"white", cursor:"pointer", fontSize:14, color:"#374151", textAlign:"left" }}
+                          onMouseOver={e=>e.currentTarget.style.borderColor="#4f46e5"}
+                          onMouseOut={e=>e.currentTarget.style.borderColor="#e5e7eb"}>
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {messages.map(m => (
+                  <div key={m.id} style={{ display:"flex", flexDirection:"column", alignItems: m.role==="user" ? "flex-end" : "flex-start" }}>
+                    <div style={{ display:"flex", alignItems:"flex-end", gap:8 }}>
+                      {m.role==="tutor" && <div style={{ width:30, height:30, borderRadius:"50%", background:"#4f46e5", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, flexShrink:0 }}>🎓</div>}
+                      <div style={{ maxWidth:"78%", padding:"12px 14px",
+                        borderRadius: m.role==="user" ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
+                        background: m.role==="user" ? "#4f46e5" : "white",
+                        color: m.role==="user" ? "white" : "#1f2937",
+                        fontSize:14, lineHeight:1.7, boxShadow:"0 1px 4px rgba(0,0,0,0.08)", whiteSpace:"pre-wrap" }}>
+                        {m.text}
+                      </div>
+                    </div>
+                    {m.role==="tutor" && m.phrases?.length > 0 && (
+                      <div style={{ marginLeft:38, marginTop:6, display:"flex", flexWrap:"wrap", gap:6 }}>
+                        {m.phrases.map((p,i) => (
+                          <div key={i} style={{ display:"flex", gap:4 }}>
+                            <button onClick={()=>speak(p.script, languages[lang].lang)}
+                              style={{ background:"#ede9fe", border:"none", borderRadius:8, padding:"4px 10px", cursor:"pointer", fontSize:13 }}>
+                              🔊 {p.pronunciation}
+                            </button>
+                            <button onClick={()=>toggleFav(p)}
+                              style={{ background: isFav(p) ? "#fef08a" : "#f3f4f6", border:"none", borderRadius:8, padding:"4px 10px", cursor:"pointer", fontSize:13 }}>
+                              {isFav(p) ? "⭐ Saved" : "☆ Save"}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                {loading && (
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <div style={{ width:30, height:30, borderRadius:"50%", background:"#4f46e5", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14 }}>🎓</div>
+                    <div style={{ background:"white", borderRadius:"18px 18px 18px 4px", padding:"12px 14px", boxShadow:"0 1px 4px rgba(0,0,0,0.08)" }}>
+                      <div style={{ display:"flex", gap:4 }}>
+                        {[0,1,2].map(i=><div key={i} style={{ width:7, height:7, borderRadius:"50%", background:"#4f46e5", animation:"bounce 1s infinite", animationDelay:`${i*0.15}s` }}/>)}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div ref={bottomRef}/>
+              </div>
+
+              <div style={{ padding:"12px 16px", background:"white", borderTop:"1px solid #e5e7eb", display:"flex", gap:8 }}>
+                <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendMessage()}
+                  placeholder="Ask anything in English... 😊"
+                  style={{ flex:1, padding:"11px 16px", borderRadius:24, border:"2px solid #e5e7eb", fontSize:14, outline:"none" }}
+                  onFocus={e=>e.target.style.borderColor="#4f46e5"}
+                  onBlur={e=>e.target.style.borderColor="#e5e7eb"} />
+                <button onClick={()=>sendMessage()} disabled={loading||!input.trim()}
+                  style={{ width:46, height:46, borderRadius:"50%", background:loading||!input.trim()?"#e5e7eb":"#4f46e5", color:"white", border:"none", cursor:loading||!input.trim()?"not-allowed":"pointer", fontSize:18 }}>
+                  ➤
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
